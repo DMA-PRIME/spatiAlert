@@ -1,0 +1,46 @@
+Package: spatialert
+Title: Interactive Spatial Hotspot Analysis for Public Health
+Version: 0.1.0
+Authors@R: c(
+    person("Emily A.", "Serman", email = "eserman@clemson.edu", role = c("aut", "cre")),
+    person("Brian", "Witrick", role = "aut"),
+    person("Lior", "Rennert", role = "aut"))
+Description: A Shiny-based tool for identifying and visualizing spatial hotspots
+    in public health data using the Getis-Ord Gi* statistic. Designed for public
+    health practitioners, spatialert runs entirely on the local machine so that
+    sensitive data never leaves the user's environment. Supports school-level,
+    facility-level, and pre-aggregated areal data at the county, census tract,
+    or block group level for any US state.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.1
+Depends:
+    R (>= 4.1.0)
+Imports:
+    shiny (>= 1.8.0),
+    bslib (>= 0.6.0),
+    leaflet (>= 2.2.0),
+    leaflet.extras (>= 1.0.0),
+    sf (>= 1.0.0),
+    spdep (>= 1.3.0),
+    tigris (>= 2.0.0),
+    tidycensus (>= 1.5.0),
+    dplyr (>= 1.1.0),
+    tidyr (>= 1.3.0),
+    readr (>= 2.1.0),
+    ggplot2 (>= 3.4.0),
+    DT (>= 0.31),
+    shinyjs (>= 2.1.0),
+    waiter (>= 0.2.5),
+    officer (>= 0.6.0),
+    flextable (>= 0.9.0),
+    glue (>= 1.7.0),
+    rlang (>= 1.1.0)
+Suggests:
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown
+VignetteBuilder: knitr
+URL: https://github.com/DMA-PRIME/spatiAlert
+BugReports: https://github.com/DMA-PRIME/spatiAlert/issues
