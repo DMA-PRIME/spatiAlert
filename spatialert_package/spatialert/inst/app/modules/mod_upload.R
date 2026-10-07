@@ -1,5 +1,28 @@
 # mod_upload.R — Data upload and validation module
 
+# CSV files saved from Excel on Windows are often Windows-1252, not UTF-8 (for
+# example an en dash or curly apostrophe in a school name). Text with invalid
+# UTF-8 can make the map layers fail, so convert any such text to UTF-8 on load.
+fix_text_encoding <- function(df) {
+  if (!is.data.frame(df)) return(df)
+  fix <- function(x) {
+    x <- as.character(x)
+    bad <- !is.na(x) & !validUTF8(x)
+    if (any(bad)) {
+      y <- iconv(x[bad], from = "windows-1252", to = "UTF-8")
+      y[is.na(y)] <- iconv(x[bad][is.na(y)], from = "latin1", to = "UTF-8", sub = "byte")
+      x[bad] <- y
+    }
+    x
+  }
+  nm <- names(df)
+  if (any(!validUTF8(nm))) names(df) <- fix(nm)
+  for (j in seq_along(df)) {
+    if (is.character(df[[j]]) || is.factor(df[[j]])) df[[j]] <- if (is.factor(df[[j]])) factor(fix(df[[j]])) else fix(df[[j]])
+  }
+  df
+}
+
 mod_upload_ui <- function(id) {
   ns <- NS(id)
   tagList(
@@ -42,9 +65,9 @@ mod_upload_server <- function(id, rv) {
       ext <- tolower(tools::file_ext(input$file$name))
       tryCatch({
         switch(ext,
-          csv  = readr::read_csv(input$file$datapath, show_col_types = FALSE),
-          xlsx = readxl::read_xlsx(input$file$datapath),
-          xls  = readxl::read_xls(input$file$datapath),
+          csv  = fix_text_encoding(readr::read_csv(input$file$datapath, show_col_types = FALSE)),
+          xlsx = fix_text_encoding(readxl::read_xlsx(input$file$datapath)),
+          xls  = fix_text_encoding(readxl::read_xls(input$file$datapath)),
           NULL
         )
       }, error = function(e) NULL)
@@ -55,6 +78,18 @@ mod_upload_server <- function(id, rv) {
       req(raw_data())
       cols        <- names(raw_data())
       col_choices <- setNames(cols, cols)
+
+      # Best guess for the school-name column (Mode A only)
+      school_guess <- {
+        exact <- cols[tolower(cols) %in% c("school", "school_name", "school name",
+                                           "facility", "facility_name", "facility name")]
+        if (length(exact) > 0) {
+          exact[1]
+        } else {
+          m <- grep("school|facility", cols, ignore.case = TRUE, value = TRUE)
+          if (length(m) > 0) m[1] else "__none__"
+        }
+      }
 
       tagList(
         hr(),
@@ -95,7 +130,22 @@ mod_upload_server <- function(id, rv) {
                         selected = grep("lat", cols, ignore.case = TRUE, value = TRUE)[1]),
             selectInput(ns("lon_col"), "Longitude column",
                         choices  = col_choices,
-                        selected = grep("lon|lng", cols, ignore.case = TRUE, value = TRUE)[1])
+                        selected = grep("lon|lng", cols, ignore.case = TRUE, value = TRUE)[1]),
+            selectInput(ns("school_col"),
+                        "School / facility name column (optional)",
+                        choices  = c("None — don't list schools by name" = "__none__",
+                                     col_choices),
+                        selected = school_guess),
+            helpText("Used to list individual schools in the results (schools of concern table and map)."),
+            selectInput(ns("grade_col"),
+                        "Grade / group column (optional)",
+                        choices  = c("None \u2014 one row per school" = "__none__",
+                                     col_choices),
+                        selected = {
+                          g <- cols[tolower(cols) %in% c("grade", "grade_level", "grade level")]
+                          if (length(g) > 0) g[1] else "__none__"
+                        }),
+            helpText("If your file has one row per school AND grade (for example Kindergarten, 7th and 12th), choose the grade column so schools are not mistaken for separate sites.")
           )
         }
       )
@@ -286,6 +336,8 @@ mod_upload_server <- function(id, rv) {
       )
     })
 
+    clean_num <- function(x) suppressWarnings(as.numeric(
+      gsub("[%,[:space:]]", "", gsub("^<.*$", NA, as.character(x)))))
 
     validated <- eventReactive(input$confirm, {
       req(raw_data(), input$analyze_target, input$source_type)
@@ -295,9 +347,9 @@ mod_upload_server <- function(id, rv) {
       ext <- tolower(tools::file_ext(input$file$name))
       df  <- tryCatch({
         switch(ext,
-          csv  = readr::read_csv(input$file$datapath, show_col_types = FALSE),
-          xlsx = readxl::read_xlsx(input$file$datapath),
-          xls  = readxl::read_xls(input$file$datapath)
+          csv  = fix_text_encoding(readr::read_csv(input$file$datapath, show_col_types = FALSE)),
+          xlsx = fix_text_encoding(readxl::read_xlsx(input$file$datapath)),
+          xls  = fix_text_encoding(readxl::read_xls(input$file$datapath))
         )
       }, error = function(e) NULL)
 
@@ -342,9 +394,7 @@ mod_upload_server <- function(id, rv) {
       if (input$source_type == "direct") {
 
         # Handle "<10" style suppression strings before coercing
-        raw_col <- suppressWarnings(
-          as.numeric(gsub("^<.*$", NA, as.character(df[[input$direct_col]])))
-        )
+        raw_col <- clean_num(df[[input$direct_col]])
         n_before  <- nrow(df)
         keep      <- !is.na(raw_col)
         df        <- df[keep, ]
@@ -388,9 +438,7 @@ mod_upload_server <- function(id, rv) {
         # simply fall back to being excluded from the weighted average at
         # aggregation time rather than blocking the whole upload.
         if (has_weight_col) {
-          df[[input$weight_col]] <- suppressWarnings(
-            as.numeric(gsub("^<.*$", NA, as.character(df[[input$weight_col]])))
-          )
+          df[[input$weight_col]] <- clean_num(df[[input$weight_col]])
           n_bad_weight <- sum(is.na(df[[input$weight_col]]) | df[[input$weight_col]] <= 0)
           if (n_bad_weight > 0) {
             warns <- c(warns, paste0(n_bad_weight, " row(s) have a missing, zero, or ",
@@ -403,12 +451,8 @@ mod_upload_server <- function(id, rv) {
       } else {
 
         # Handle "<10" strings in enrollment before coercing
-        df[[input$eligible_col]] <- suppressWarnings(
-          as.numeric(gsub("^<.*$", NA, as.character(df[[input$eligible_col]])))
-        )
-        vacc_raw <- suppressWarnings(as.numeric(
-          gsub("^<.*$", NA, as.character(df[[input$vaccinated_col]]))
-        ))
+        df[[input$eligible_col]] <- clean_num(df[[input$eligible_col]])
+        vacc_raw <- clean_num(df[[input$vaccinated_col]])
         df[[input$vaccinated_col]] <- vacc_raw
 
         # Drop rows with missing rate or enrollment
@@ -573,16 +617,39 @@ mod_upload_server <- function(id, rv) {
         rv$direct_col            <- if (input$source_type == "direct") input$direct_col else NULL
         rv$lat_col               <- input$lat_col
         rv$lon_col                <- input$lon_col
+        rv$school_col             <- if (input$mode == "facility" &&
+                                         !is.null(input$school_col) &&
+                                         !identical(input$school_col, "__none__")) {
+          input$school_col
+        } else {
+          NULL
+        }
+        rv$grade_col              <- if (input$mode == "facility" &&
+                                         !is.null(input$grade_col) &&
+                                         !identical(input$grade_col, "__none__")) {
+          input$grade_col
+        } else {
+          NULL
+        }
+        rv$school_data            <- NULL   # rebuilt by the join below
         rv$n_dropped              <- v$n_dropped
         rv$n_small                <- v$n_small
 
         # If geography already loaded, attempt join immediately
         if (!is.null(rv$geo)) {
-          join_result    <- attempt_join(rv$geo, rv)
-          rv$joined_data <- join_result$geo
-          rv$n_matched   <- join_result$n_matched
-          rv$n_unmatched <- join_result$n_unmatched
-          rv$agg_weighted <- join_result$weighted
+          join_result <- tryCatch(attempt_join(rv$geo, rv), error = function(e) e)
+          if (inherits(join_result, "error")) {
+            rv$joined_data <- NULL
+            msgs <- tagAppendChildren(msgs,
+              div(class = "alert alert-danger mt-2",
+                icon("circle-xmark"), " ", conditionMessage(join_result)))
+          } else {
+            rv$joined_data  <- join_result$geo
+            rv$n_matched    <- join_result$n_matched
+            rv$n_unmatched  <- join_result$n_unmatched
+            rv$agg_weighted <- join_result$weighted
+            rv$school_data  <- join_result$schools   # NULL in Mode B
+          }
         }
       }
 

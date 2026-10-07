@@ -21,7 +21,8 @@ PAPER_DEFAULTS <- list(
   knn_k          = 8,
   weights_type   = "B",
   correction     = "none",
-  alpha          = 0.05
+  alpha          = 0.05,
+  no_school      = "default"     # resolved from the analysis variable: zero for counts, exclude for rates
 )
 
 mod_analysis_ui <- function(id) {
@@ -236,6 +237,8 @@ mod_analysis_server <- function(id, rv, parent_session) {
           "Positive and significant = hotspot; negative and significant = coldspot."
         ),
 
+        uiOutput(ns("no_school_ui")),
+
         maybe_disable(
           selectInput(
             ns("correction"),
@@ -290,9 +293,66 @@ mod_analysis_server <- function(id, rv, parent_session) {
         knn_k         = input$knn_k         %||% PAPER_DEFAULTS$knn_k,
         weights_type  = input$weights_type  %||% PAPER_DEFAULTS$weights_type,
         correction    = input$correction    %||% PAPER_DEFAULTS$correction,
-        alpha         = input$alpha         %||% PAPER_DEFAULTS$alpha
+        alpha         = input$alpha         %||% PAPER_DEFAULTS$alpha,
+        no_school     = input$no_school     %||% PAPER_DEFAULTS$no_school
       )
     }
+
+    # ── How to treat areas with no schools / no data ────────────────────────
+    # Remembers which analysis variable the selector was last built for, so a
+    # change of variable resets to that variable's sensible default while
+    # other re-renders keep the user's choice.
+    ns_last_target <- NULL
+    output$no_school_ui <- renderUI({
+      target <- rv$analyze_target %||% "undervax_count"
+      locked <- isTRUE(input$paper_defaults)
+      is_rate <- target %in% c("undervax_rate", "vax_rate")
+      def    <- default_no_school(target)
+
+      prev <- isolate(input$no_school)
+      keep_prev <- !locked && !is.null(prev) && prev %in% c("zero", "exclude", "mean") &&
+        identical(ns_last_target, target)
+      ns_last_target <<- target
+      selected <- if (keep_prev) prev else def
+
+      tagList(
+        maybe_disable(
+          selectInput(
+            ns("no_school"),
+            "Areas with no schools",
+            choices = c(
+              "Count as zero"                 = "zero",
+              "Exclude from the analysis"     = "exclude",
+              "Use the study-area average"    = "mean"
+            ),
+            selected = selected
+          ),
+          locked
+        ),
+        div(
+          class = "alert alert-light border mb-2",
+          style = "font-size: 0.82rem; line-height: 1.5; color: #333333;",
+          if (is_rate) {
+            tagList(
+              "Areas with no schools have no rate to report. ",
+              tags$strong("Exclude"), " (the default for rates) analyzes only areas with data. ",
+              tags$strong("Count as zero"), " would treat them as a rate of 0%, which can create artificial clusters. ",
+              tags$strong("Study-area average"), " makes them neutral."
+            )
+          } else {
+            tagList(
+              "Areas with no schools have no undervaccinated students recorded. ",
+              tags$strong("Count as zero"), " (the default, as in the published analysis) keeps them in the analysis with a value of 0. ",
+              tags$strong("Exclude"), " drops them. ",
+              tags$strong("Study-area average"), " gives them the average value of areas that do have schools."
+            )
+          },
+          tags$br(),
+          tags$span(class = "text-muted",
+                    "Excluded areas appear as gaps on the map, and with queen/rook neighbors they can leave some areas with fewer neighbors.")
+        )
+      )
+    })
 
     # Initial render (switch starts off)
     output$settings_ui <- renderUI({
@@ -423,11 +483,10 @@ mod_analysis_server <- function(id, rv, parent_session) {
         county        = "county",
         `block group` = "census block group",
         custom        = "area",
-        "area"
+        level %||% "area"      # custom geographies pass their own label
       )
       if (isTRUE(n == 1)) return(base)
-      if (base == "county") return("counties")
-      paste0(base, "s")
+      spatialert_pluralize(base)
     }
 
     # Shared analysis runner, used both by the "Run analysis" button (reads
@@ -435,7 +494,7 @@ mod_analysis_server <- function(id, rv, parent_session) {
     # directly, so it works instantly without waiting on the settings panel
     # to finish re-rendering).
     do_run <- function(w_style, w_type, use_consensus, k_vals, min_specs,
-                        knn_k, correction, alpha) {
+                        knn_k, correction, alpha, no_school = "default") {
       req(rv$geo, rv$joined_data)
 
       var_col <- rv$value_col %||% ".value"
@@ -461,6 +520,7 @@ mod_analysis_server <- function(id, rv, parent_session) {
         return(invisible())
       }
 
+      rv$global_g <- NULL
       output$run_status <- renderUI({
         div(class = "alert alert-info mt-2", style = "color: #333333;",
           icon("spinner", class = "fa-spin"), " Building weights and running analysis...")
@@ -468,9 +528,33 @@ mod_analysis_server <- function(id, rv, parent_session) {
 
       tryCatch({
 
+        # Areas with no schools / no data: apply the chosen treatment
+        no_school_opt <- resolve_no_school(no_school, rv$analyze_target)
+        geo_in <- rv$joined_data
+        x_in   <- geo_in[[var_col]]
+        no_data <- is.na(x_in)
+        if (".n_facilities" %in% names(geo_in)) no_data <- no_data | is.na(geo_in$.n_facilities)
+        n_no_school <- sum(no_data)
+        if (n_no_school > 0) {
+          if (identical(no_school_opt, "exclude")) {
+            geo_in <- geo_in[!no_data, ]
+          } else if (identical(no_school_opt, "mean")) {
+            geo_in[[var_col]][no_data] <- mean(x_in[!no_data], na.rm = TRUE)
+          } else {
+            geo_in[[var_col]][no_data] <- 0
+          }
+        }
+        if (nrow(geo_in) < 10) {
+          stop("Only ", nrow(geo_in), " area(s) have data after excluding areas with no schools. ",
+               "Choose 'Count as zero' or 'Use the study-area average' for areas with no schools.",
+               call. = FALSE)
+        }
+        rv$no_school_opt <- no_school_opt
+        rv$n_no_school   <- n_no_school
+
         if (use_consensus) {
           results <- compute_gi_star_consensus(
-            geo          = rv$joined_data,
+            geo          = geo_in,
             var          = var_col,
             k_values     = k_vals,
             weights_type = w_type,
@@ -486,7 +570,7 @@ mod_analysis_server <- function(id, rv, parent_session) {
 
         } else {
           weights <- spatialert_build_weights(
-            rv$joined_data,
+            geo_in,
             style        = w_style,
             k            = knn_k,
             weights_type = w_type
@@ -498,13 +582,22 @@ mod_analysis_server <- function(id, rv, parent_session) {
           rv$knn_k         <- knn_k
 
           results <- compute_gi_star(
-            geo        = rv$joined_data,
+            geo        = geo_in,
             var        = var_col,
             weights    = weights,
             correction = correction,
             alpha      = alpha
           )
         }
+
+        # Whole-study-area Global G test (same neighbor definition; middle k for
+        # consensus runs). Failure here never blocks the hotspot results.
+        rv$global_g <- tryCatch(
+          compute_global_g(
+            geo_in, var_col, style = w_style, k = knn_k,
+            k_values = if (use_consensus) k_vals else NULL),
+          error = function(e) NULL
+        )
 
         attr(results, "spatialert_geo_level")     <- attr(rv$geo, "spatialert_geo_level")
         attr(results, "spatialert_var_label")      <- input$var_label
@@ -529,6 +622,14 @@ mod_analysis_server <- function(id, rv, parent_session) {
           "{hot_label} and {n_cold} significant coldspot {cold_label} were ",
           "identified at \u03b1 = {alpha} ({n_ns} not significant)."
         )
+        if (n_no_school > 0) {
+          ns_phrase <- switch(no_school_opt,
+            exclude = "were excluded from the analysis",
+            mean    = "were assigned the study-area average",
+            "were counted as zero")
+          summary_msg <- glue::glue(
+            "{summary_msg} {n_no_school} {geo_level_label(geo_lvl, n_no_school)} with no schools {ns_phrase}.")
+        }
         if (use_consensus) {
           summary_msg <- glue::glue(
             "{summary_msg} Significance required consensus across k = ",
@@ -537,10 +638,13 @@ mod_analysis_server <- function(id, rv, parent_session) {
           )
         }
 
+        gg_msg <- global_g_text(rv$global_g, short = TRUE)
+
         output$run_status <- renderUI({
           tagList(
             div(class = "alert alert-success mt-2", style = "color: #333333;",
-              icon("circle-check"), " Analysis complete. ", summary_msg
+              icon("circle-check"), " Analysis complete. ", summary_msg,
+              if (nzchar(gg_msg)) tagList(tags$br(), tags$br(), gg_msg)
             ),
             actionButton(
               ns("go_results"),
@@ -575,7 +679,8 @@ mod_analysis_server <- function(id, rv, parent_session) {
       do_run(
         w_style = w_style, w_type = w_type, use_consensus = use_consensus,
         k_vals = k_vals, min_specs = min_specs, knn_k = knn_k,
-        correction = input$correction, alpha = input$alpha
+        correction = input$correction, alpha = input$alpha,
+        no_school = input$no_school %||% "default"
       )
     })
 
@@ -599,10 +704,46 @@ mod_analysis_server <- function(id, rv, parent_session) {
         min_specs     = d$min_specs,
         knn_k         = d$knn_k,
         correction    = d$correction,
-        alpha         = d$alpha
+        alpha         = d$alpha,
+        no_school     = d$no_school
       )
     })
   })
+}
+
+# Plain-language description of the Global G result. `short` is for the app
+# (one or two sentences); the long form goes in the report methods.
+global_g_text <- function(gg, short = FALSE) {
+  if (is.null(gg)) return("")
+  if (!isTRUE(gg$ran)) {
+    return(if (short) paste0("Global G test not run: ", gg$reason, ".") else "")
+  }
+  ptxt <- if (gg$p < 0.001) "p < 0.001" else sprintf("p = %.3f", gg$p)
+  stat <- sprintf("z = %.2f, %s", gg$z, ptxt)
+  sig  <- gg$p < 0.05
+  if (short) {
+    paste0(
+      "Whole-area check (Global G, ", gg$label, "): ", stat, ". ",
+      if (sig) "High values are clustered more than expected by chance across the whole study area."
+      else "There is no significant evidence that high values cluster across the whole study area, so read the local hotspots with caution."
+    )
+  } else {
+    paste0(
+      "A Global Getis-Ord General G test, which checks whether high values cluster across the whole study area, ",
+      "was also run using ", gg$label, " with binary weights (one-sided, testing for clustering of high values). ",
+      if (sig) paste0("It was statistically significant (", stat, "), indicating that high values are clustered more than expected by chance. ")
+      else paste0("It was not statistically significant (", stat, "), so there is no clear evidence of clustering across the whole study area and local results should be interpreted with caution. ")
+    )
+  }
+}
+
+# Default treatment of areas with no schools: zero for counts (as in the
+# published analysis); excluded for rates, which are undefined with no students.
+default_no_school <- function(target) {
+  if (target %in% c("undervax_rate", "vax_rate")) "exclude" else "zero"
+}
+resolve_no_school <- function(val, target) {
+  if (is.null(val) || !val %in% c("zero", "exclude", "mean")) default_no_school(target %||% "undervax_count") else val
 }
 
 parse_k_list <- function(txt) {

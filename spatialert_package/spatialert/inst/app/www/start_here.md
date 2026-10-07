@@ -20,12 +20,16 @@ and why KNN with a multi-k consensus check is the default here.
 
 1. **Data & Geography** — Upload your data, tell the app what you want to
    analyze (a count or a rate), and choose the geography to map it to
-   (census tract, county, ZIP, or your own shapefile).
+   (census tract, county, ZIP, or your own shapefile such as school districts).
+   *Optional:* use the **Explore** tab to map and summarize your data before
+   running any analysis, and to make printable maps.
 2. **Analysis** — Choose spatial weights and run the Gi\* hotspot
-   statistic. Click **"Use defaults\*"** if you want to replicate the
-   published analysis exactly.
-3. **Results & Export** — View the map and table, download a CSV, generate
-   a Word report, or copy ready-made methods text for your own manuscript.
+   statistic. Switch on **Use defaults** to use the settings from the
+   published analysis.
+3. **Results & Export** — View the map and table, see the **Schools of
+   concern** in the flagged areas, download a CSV, generate a Word report, or
+   copy ready-made methods text for your own manuscript. The **FAQ** tab
+   explains how to read the results.
 
 ### What kind of data can spatiAlert handle?
 

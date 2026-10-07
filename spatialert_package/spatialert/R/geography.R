@@ -280,7 +280,11 @@ join_to_geography <- function(data, geo, value_col,
     geo         = result_geo,
     n_matched   = n_matched,
     n_unmatched = n_unmatched,
-    weighted    = has_eligible
+    weighted    = has_eligible,
+    # School-level rows that fell inside an area, each carrying its area ID
+    # (GEOID) and all original columns. Used for the "schools of concern"
+    # table and the school layer on the map.
+    schools     = as.data.frame(jd)
   )
 }
 

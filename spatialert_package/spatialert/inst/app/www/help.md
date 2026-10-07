@@ -23,7 +23,7 @@ download, or the **Start Here** tab for a quick overview.
 If you use spatiAlert in a publication or report, please cite both the app
 and the analysis it accompanies:
 
-> **App:** Serman, E.A., Witrick, B., & Rennert, L. (2025). spatialert: Interactive
+> **App:** Serman, E.A., Witrick, B., & Rennert, L. (2026). spatialert: Interactive
 > Spatial Hotspot Analysis for Public Health. R package. https://github.com/DMA-PRIME/spatiAlert
 
 > **Published analysis:** Clusters of Concern — Spatial Link between Childhood

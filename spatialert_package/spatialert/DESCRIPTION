@@ -10,7 +10,8 @@ Description: A Shiny-based tool for identifying and visualizing spatial hotspots
     health practitioners, spatialert runs entirely on the local machine so that
     sensitive data never leaves the user's environment. Supports school-level,
     facility-level, and pre-aggregated areal data at the county, census tract,
-    or block group level for any US state.
+    or block group level for any US state, or for user-supplied boundaries
+    such as school districts.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
@@ -36,8 +37,13 @@ Imports:
     officer (>= 0.6.0),
     flextable (>= 0.9.0),
     glue (>= 1.7.0),
-    rlang (>= 1.1.0)
+    rlang (>= 1.1.0),
+    readxl (>= 1.4.0),
+    scales (>= 1.2.0),
+    htmltools (>= 0.5.0),
+    markdown (>= 1.7)
 Suggests:
+    classInt (>= 0.4-0),
     testthat (>= 3.0.0),
     knitr,
     rmarkdown

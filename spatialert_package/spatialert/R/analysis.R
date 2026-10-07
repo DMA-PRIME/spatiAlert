@@ -122,6 +122,10 @@ spatialert_build_weights <- function(geo, style = "queen", k = 5,
 #' @param correction Character. Multiple comparisons correction:
 #'   `"none"`, `"fdr"` (Benjamini-Hochberg), or `"bonferroni"`.
 #' @param alpha Numeric. Significance threshold. Default 0.05.
+#' @param include_self Logical. If `TRUE` (default) each area is counted in its own
+#'   neighbourhood, which is what makes the statistic Gi* rather than Gi.
+#'   `spdep::localG()` only does this when the neighbour list includes the area
+#'   itself, so it is added here via `spdep::include.self()`.
 #'
 #' @return The input `sf` object with additional columns:
 #'   - `gi_star`: Gi* z-score
@@ -131,7 +135,8 @@ spatialert_build_weights <- function(geo, style = "queen", k = 5,
 #'
 #' @export
 compute_gi_star <- function(geo, var, weights,
-                            correction = "fdr", alpha = 0.05) {
+                            correction = "fdr", alpha = 0.05,
+                            include_self = TRUE) {
   correction <- match.arg(correction, c("none", "fdr", "bonferroni"))
 
   x <- geo[[var]]
@@ -141,6 +146,16 @@ compute_gi_star <- function(geo, var, weights,
   if (any(is.na(x))) {
     warning("Missing values in `", var, "` replaced with 0.", call. = FALSE)
     x[is.na(x)] <- 0
+  }
+
+  # Gi* (as opposed to Gi) counts the area's own value in its neighbourhood.
+  # spdep::localG() only does that when the neighbour list already includes
+  # the area itself, so add it here (keeping the same weights style, B or W).
+  if (isTRUE(include_self) && !isTRUE(attr(weights$neighbours, "self.included"))) {
+    weights <- spdep::nb2listw(
+      spdep::include.self(weights$neighbours),
+      style = weights$style, zero.policy = TRUE
+    )
   }
 
   # Compute Gi* using localG (analytical p-values)
@@ -166,6 +181,7 @@ compute_gi_star <- function(geo, var, weights,
   attr(geo, "spatialert_var")        <- var
   attr(geo, "spatialert_correction") <- correction
   attr(geo, "spatialert_alpha")      <- alpha
+  attr(geo, "spatialert_include_self") <- isTRUE(include_self)
 
   geo
 }
@@ -335,4 +351,65 @@ classify_hotspots <- function(z, p_adj, alpha = 0.05) {
     TRUE                   ~ "Not significant"
   )
   factor(result, levels = c("Hotspot", "Coldspot", "Not significant"))
+}
+
+
+#' Global Getis-Ord General G test
+#'
+#' @description
+#' Tests whether high values of `var` cluster together across the whole study
+#' area (one-sided: clustering of high values). Uses the same neighbour
+#' definition as the hotspot analysis but always with binary weights, which is
+#' what the test is designed for. The area itself is not included (that is only
+#' for the local Gi* statistic). For KNN consensus runs, pass `k_values` and the
+#' middle value is used.
+#'
+#' @param geo An `sf` object with polygon geometry.
+#' @param var Character. Numeric (non-negative) column to test.
+#' @param style `"queen"`, `"rook"` or `"knn"`.
+#' @param k Integer. Neighbours for `style = "knn"`.
+#' @param k_values Optional vector of k values from a consensus run; the middle
+#'   one is used and `k` is ignored.
+#'
+#' @return A list. `ran` is `TRUE` with `G`, `expected`, `z`, `p`, `style`, `k`,
+#'   `label` and `n`; otherwise `ran` is `FALSE` with a plain-language `reason`.
+#' @export
+compute_global_g <- function(geo, var, style = "queen", k = 8, k_values = NULL) {
+  x <- geo[[var]]
+  if (!is.numeric(x)) return(list(ran = FALSE, reason = "the analysis variable is not numeric"))
+  x[is.na(x)] <- 0
+  if (any(x < 0)) {
+    return(list(ran = FALSE,
+                reason = "the Global G test requires non-negative values and this variable has negative values"))
+  }
+  if (!is.null(k_values) && length(k_values) > 0) {
+    kv    <- sort(unique(k_values))
+    k     <- kv[ceiling(length(kv) / 2)]
+    style <- "knn"
+  }
+  out <- tryCatch({
+    w <- suppressWarnings(
+      spatialert_build_weights(geo, style = style, k = k, weights_type = "B")
+    )
+    r <- suppressWarnings(
+      spdep::globalG.test(x, listw = w, zero.policy = TRUE, alternative = "greater")
+    )
+    list(
+      ran      = TRUE,
+      G        = unname(r$estimate[["Global G statistic"]]),
+      expected = unname(r$estimate[["Expectation"]]),
+      z        = as.numeric(r$statistic),
+      p        = as.numeric(r$p.value),
+      style    = style,
+      k        = k,
+      n        = length(x),
+      label    = switch(style,
+        queen = "queen contiguity",
+        rook  = "rook contiguity",
+        knn   = paste0("k-nearest neighbors (k = ", k, ")"))
+    )
+  }, error = function(e) {
+    list(ran = FALSE, reason = paste("the test could not be computed:", conditionMessage(e)))
+  })
+  out
 }

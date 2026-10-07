@@ -42,18 +42,22 @@ mod_geography_ui <- function(id) {
       fileInput(
         ns("shapefile"),
         "Upload geography file",
-        accept = c(".geojson", ".json", ".zip")
+        multiple = TRUE,
+        accept   = c(".geojson", ".json", ".zip",
+                     ".shp", ".dbf", ".shx", ".prj", ".cpg")
       ),
       helpText(
         icon("circle-info"), " ",
-        tags$strong("Shapefile users:"), " Zip all shapefile components ",
-        "(.shp, .dbf, .shx, .prj) into a single .zip file before uploading. ",
-        "GeoJSON files (.geojson) can be uploaded directly."
+        tags$strong("Shapefile users:"), " either upload a single .zip, or ",
+        "select all the shapefile parts at once (.shp, .dbf, .shx, .prj). ",
+        "GeoJSON files (.geojson) can be uploaded directly. Any polygon ",
+        "geography works (school districts, health districts, ZIP areas, ...)."
       ),
+      uiOutput(ns("custom_id_ui")),
       textInput(
-        ns("custom_id_col"),
-        "ID column in shapefile (to match your data)",
-        placeholder = "e.g. GEOID, fips_code"
+        ns("custom_label"),
+        "What do these areas represent? (used in labels and reports)",
+        placeholder = "e.g. school district"
       )
     ),
 
@@ -72,6 +76,46 @@ mod_geography_ui <- function(id) {
 mod_geography_server <- function(id, rv) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
+
+    # ── Custom geography: read once, reuse for the ID picker and for loading ──
+    custom_geo_raw <- reactive({
+      req(input$shapefile)
+      read_custom_geo(input$shapefile)
+    })
+
+    output$custom_id_ui <- renderUI({
+      req(input$shapefile)
+      g <- tryCatch(custom_geo_raw(), error = function(e) e)
+      if (inherits(g, "error")) {
+        return(div(class = "alert alert-danger mt-1",
+                   icon("circle-xmark"), " ", conditionMessage(g)))
+      }
+      d    <- sf::st_drop_geometry(g)
+      cols <- names(d)
+      if (length(cols) == 0) {
+        return(div(class = "alert alert-danger mt-1",
+                   "This file has no attribute columns to use as an ID."))
+      }
+      n_uniq <- vapply(d, function(x) length(unique(x[!is.na(x)])), integer(1))
+      labels <- sprintf("%s  (%d unique of %d)", cols, n_uniq, nrow(d))
+      # Best guess: GEOID, else a column whose name looks like an ID/code and
+      # whose values are all unique, else any column with all-unique values.
+      all_unique <- n_uniq == nrow(d)
+      guess <- cols[toupper(cols) == "GEOID"]
+      if (length(guess) == 0) {
+        guess <- cols[all_unique & grepl("GEOID|FIPS|AUN|_ID$|^ID$|CODE|NUM",
+                                         cols, ignore.case = TRUE)]
+      }
+      if (length(guess) == 0) guess <- cols[all_unique]
+      tagList(
+        selectInput(ns("custom_id_col"),
+                    "ID column in shapefile (must match an ID column in your data)",
+                    choices  = setNames(cols, labels),
+                    selected = if (length(guess) > 0) guess[1] else cols[1]),
+        helpText("Pick a column where every area has a different value ",
+                 "(unique count = total rows).")
+      )
+    })
 
     output$county_selector <- renderUI({
       req(input$state, input$geo_level %in% c("tract", "block group"))
@@ -123,30 +167,41 @@ mod_geography_server <- function(id, rv) {
 
         } else {
           req(input$shapefile)
-          path <- input$shapefile$datapath
-          if (tolower(tools::file_ext(input$shapefile$name)) == "zip") {
-            unzip_dir <- tempfile()
-            dir.create(unzip_dir)
-            unzip(path, exdir = unzip_dir)
-            path <- list.files(unzip_dir, pattern = "\\.shp$",
-                               full.names = TRUE, recursive = TRUE)[1]
+          geo <- custom_geo_raw()
+
+          idc <- input$custom_id_col
+          if (is.null(idc) || !nzchar(idc) || !idc %in% names(geo)) {
+            stop("Please choose the ID column in the shapefile first.")
           }
-          geo <- sf::read_sf(path)
-          geo <- sf::st_transform(geo, crs = 4326)
-          if (!is.null(input$custom_id_col) && nchar(input$custom_id_col) > 0) {
-            names(geo)[names(geo) == input$custom_id_col] <- "GEOID"
+          ids <- trimws(as.character(geo[[idc]]))
+          if (anyNA(ids) || any(!nzchar(ids))) {
+            stop("The ID column '", idc, "' has blank values. Choose a column ",
+                 "where every area has an ID.")
           }
-          if ("GEOID" %in% names(geo)) {
-            geo <- geo[order(geo$GEOID), ]
+          if (anyDuplicated(ids) > 0) {
+            stop("The ID column '", idc, "' is not unique (",
+                 sum(duplicated(ids)), " repeated value(s)). Choose a column ",
+                 "where each area has a different value.")
           }
-          attr(geo, "spatialert_geo_level") <- "custom"
+          # Standardize on a character column called GEOID (replacing any
+          # existing, different GEOID column so names never collide).
+          geo$GEOID <- ids
+          geo <- geo[order(geo$GEOID), ]
+
+          custom_unit <- trimws(input$custom_label %||% "")
+          if (!nzchar(custom_unit)) custom_unit <- "area"
+          # The label itself is stored as the "geography level": downstream
+          # titles/summaries fall back to printing it as-is for non-census levels.
+          attr(geo, "spatialert_geo_level") <- custom_unit
           attr(geo, "spatialert_state")     <- NA
         }
 
         # Store geo — weights will be built in analysis module
         rv$geo       <- geo
-        rv$geo_level <- input$geo_level
-        rv$state     <- input$state
+        is_custom    <- input$geo_source == "custom"
+        unit_label   <- if (is_custom) attr(geo, "spatialert_geo_level") else input$geo_level
+        rv$geo_level <- unit_label
+        rv$state     <- if (is_custom) "" else input$state
 
         # Attempt join if data already uploaded
         if (!is.null(rv$uploaded_data)) {
@@ -155,14 +210,19 @@ mod_geography_server <- function(id, rv) {
           rv$n_matched   <- join_result$n_matched
           rv$n_unmatched <- join_result$n_unmatched
           rv$agg_weighted <- join_result$weighted
+          rv$school_data  <- join_result$schools   # NULL in Mode B
         }
 
-        status_msg <- glue::glue("Loaded {nrow(geo)} {input$geo_level}(s). ",
+        status_msg <- glue::glue("Loaded {nrow(geo)} {unit_label}(s). ",
                                  "Now go to the Analysis tab to set weights and run.")
         if (!is.null(rv$n_unmatched) && rv$n_unmatched > 0) {
           status_msg <- paste0(
             status_msg, " Note: ", rv$n_unmatched,
-            " facility/school location(s) did not fall within any tract and were excluded."
+            if (identical(rv$upload_mode, "aggregate")) {
+              " row(s) in your data have an ID that was not found in this geography and were excluded."
+            } else {
+              " facility/school location(s) did not fall within any area and were excluded."
+            }
           )
         }
 
@@ -207,20 +267,43 @@ attempt_join <- function(geo, rv) {
   if (rv$upload_mode == "aggregate") {
     # Mode B: data is already at the target geography level — carry all
     # derived columns straight across, one row per GEOID already.
-    result_geo <- dplyr::left_join(
-      geo,
-      rv$uploaded_data |>
-        dplyr::select(
-          GEOID = !!rv$id_col,
-          .undervax_count = .undervax_count,
-          .undervax_rate  = .undervax_rate,
-          .vax_rate       = .vax_rate
-        ) |>
-        dplyr::mutate(GEOID = as.character(GEOID)),
-      by = "GEOID"
-    )
+    #
+    # IDs are compared in a normalized form (whitespace trimmed, a trailing
+    # ".0" and leading zeros dropped) because spreadsheets/CSV readers often
+    # turn text IDs like "042" or "104432503" into numbers, which would
+    # otherwise silently fail to match the geography's text IDs.
+    norm_id <- function(x) {
+      x <- trimws(as.character(x))
+      x <- sub("\\.0+$", "", x)
+      sub("^0+(?=.)", "", x, perl = TRUE)
+    }
+    d        <- rv$uploaded_data
+    d_key    <- norm_id(d[[rv$id_col]])
+    g_key    <- norm_id(geo$GEOID)
+    n_dup    <- sum(duplicated(d_key))
+    d        <- d[!duplicated(d_key), , drop = FALSE]   # keep first row per ID
+    d_key    <- d_key[!duplicated(d_key)]
+    pos      <- match(g_key, d_key)
+    n_found  <- sum(!is.na(pos))
+
+    if (n_found == 0) {
+      stop(
+        "None of the IDs in your data matched the geography. ",
+        "Data IDs look like: ", paste(utils::head(unique(as.character(d[[rv$id_col]])), 3), collapse = ", "),
+        "; geography IDs look like: ", paste(utils::head(geo$GEOID, 3), collapse = ", "),
+        ". Check that you picked the matching ID column in both places.",
+        call. = FALSE
+      )
+    }
+
+    result_geo <- geo
+    for (col in c(".undervax_count", ".undervax_rate", ".vax_rate")) {
+      result_geo[[col]] <- d[[col]][pos]
+    }
     result_geo$.value <- result_geo[[target_col]]
-    list(geo = result_geo, n_matched = nrow(rv$uploaded_data), n_unmatched = 0, weighted = NA)
+    list(geo = result_geo, n_matched = n_found,
+         n_unmatched = sum(!d_key %in% g_key),   # data rows with no matching area
+         n_dup = n_dup, weighted = NA)
   } else {
     # Mode A: facility-level data gets spatially joined and aggregated up
     # to the target geography.
@@ -234,6 +317,50 @@ attempt_join <- function(geo, rv) {
       target_col   = target_col
     )
   }
+}
+
+# Read an uploaded custom geography (zip, loose shapefile parts, or GeoJSON),
+# repair invalid polygons, and return it in WGS84.
+read_custom_geo <- function(files) {
+  exts <- tolower(tools::file_ext(files$name))
+  work <- tempfile("geo_"); dir.create(work)
+
+  if (any(exts == "zip")) {
+    unzip(files$datapath[exts == "zip"][1], exdir = work)
+    path <- list.files(work, pattern = "\\.(shp|geojson|json)$",
+                       full.names = TRUE, recursive = TRUE, ignore.case = TRUE)
+    if (length(path) == 0) stop("No .shp or .geojson file found inside the zip.")
+    path <- path[1]
+  } else if (any(exts == "shp")) {
+    # Loose shapefile parts: Shiny gives them temp names, so restore the
+    # original names (the parts must share a base name to be read together).
+    file.copy(files$datapath, file.path(work, files$name))
+    for (need in c("dbf", "shx")) {
+      if (!need %in% exts) {
+        stop("Missing the .", need, " file. Select all shapefile parts together ",
+             "(.shp, .dbf, .shx, .prj), or upload a single .zip.")
+      }
+    }
+    path <- file.path(work, files$name[exts == "shp"][1])
+  } else if (any(exts %in% c("geojson", "json"))) {
+    path <- files$datapath[exts %in% c("geojson", "json")][1]
+  } else {
+    stop("Unsupported file. Upload a .zip, a .geojson, or the .shp/.dbf/.shx parts.")
+  }
+
+  geo <- sf::read_sf(path)
+  if (nrow(geo) == 0) stop("The geography file has no features.")
+  if (is.na(sf::st_crs(geo))) {
+    stop("The geography file has no coordinate system (.prj missing). ",
+         "Include the .prj file, or use a GeoJSON.")
+  }
+  geo <- sf::st_make_valid(geo)
+  geo <- geo[!sf::st_is_empty(geo), ]
+  if (!all(sf::st_geometry_type(geo) %in% c("POLYGON", "MULTIPOLYGON"))) {
+    geo <- sf::st_collection_extract(geo, "POLYGON")
+  }
+  if (nrow(geo) == 0) stop("The geography file does not contain polygons.")
+  sf::st_transform(geo, crs = 4326)
 }
 
 get_county_choices <- function(state_abb) {
